@@ -7,6 +7,7 @@
     <modules>
         <module>shutdown-springboot1</module>
         <module>shutdown-springboot1-graceful</module>
+        <module>shutdown-springboot1-graceful-state</module>
     </modules>
     <groupId>com.jinpei.shutdown</groupId>
     <artifactId>graceful-shutdown</artifactId>

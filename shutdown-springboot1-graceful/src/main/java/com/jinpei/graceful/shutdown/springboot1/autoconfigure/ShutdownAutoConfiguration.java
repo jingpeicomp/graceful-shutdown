@@ -1,4 +1,4 @@
-package com.jinpei.graceful.shutdown.springboot1;
+package com.jinpei.graceful.shutdown.springboot1.autoconfigure;
 
 import com.jinpei.graceful.shutdown.springboot1.handler.JettyGracefulShutdown;
 import com.jinpei.graceful.shutdown.springboot1.handler.TomcatGracefulShutdown;
@@ -26,7 +26,7 @@ import javax.servlet.Servlet;
  */
 @Configuration
 @Slf4j
-public class GracefulShutdownConfiguration {
+public class ShutdownAutoConfiguration {
     @Configuration
     @ConditionalOnClass({Servlet.class, Tomcat.class})
     public static class TomcatConfiguration {
