@@ -46,19 +46,19 @@ public class ShutdownAutoConfiguration {
     @Configuration
     @ConditionalOnClass({Servlet.class, Undertow.class, SslClientAuthMode.class})
     public static class UndertowConfiguration {
-//        @Bean
+        @Bean
         public UndertowGracefulShutdown.UndertowGracefulShutdownWrapper undertowGracefulShutdownWrapper() {
             return new UndertowGracefulShutdown.UndertowGracefulShutdownWrapper();
         }
 
-//        @Bean
+        @Bean
         public UndertowEmbeddedServletContainerFactory undertowEmbeddedServletContainerFactory(UndertowGracefulShutdown.UndertowGracefulShutdownWrapper wrapper) {
             UndertowEmbeddedServletContainerFactory factory = new UndertowEmbeddedServletContainerFactory();
             factory.addDeploymentInfoCustomizers(deploymentInfo -> deploymentInfo.addOuterHandlerChainWrapper(wrapper));
             return factory;
         }
 
-//        @Bean
+        @Bean
         public UndertowGracefulShutdown undertowGracefulShutdown(UndertowGracefulShutdown.UndertowGracefulShutdownWrapper wrapper) {
             return new UndertowGracefulShutdown(wrapper);
         }
@@ -67,12 +67,12 @@ public class ShutdownAutoConfiguration {
     @Configuration
     @ConditionalOnClass({Servlet.class, Server.class, Loader.class, WebAppContext.class})
     public static class JettyConfiguration {
-//        @Bean
+        @Bean
         public JettyEmbeddedServletContainerFactory jettyEmbeddedServletContainerFactory() {
             return new JettyEmbeddedServletContainerFactory();
         }
 
-//        @Bean
+        @Bean
         public JettyGracefulShutdown jettyGracefulShutdown(EmbeddedWebApplicationContext context) {
             return new JettyGracefulShutdown(context);
         }
