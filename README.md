@@ -453,3 +453,180 @@ server.shutdown=graceful
 # 设置缓冲期，最大等待时间，默认：30秒
 spring.lifecycle.timeout-per-shutdown-phase=60s
 ```
+
+## 5 多负载下的优雅启停
+
+前面介绍的 Spring Boot 应用优雅停机都是针对单机，只是保证了服务器内部请求执行完毕，无法完成新请求的响应。在生产环境，我们的服务会有多台负载，服务的前面会有网关或者负载均衡之类的组件。只要我们能够做到：
+
+1. 优雅停机。在应用关闭前，通知网关让服务下线，这样就不会有新请求过来，再配合优雅停机处理完正在进行的请求。
+2. 优雅启动。在应用启动后，直到应用启动完成并且健康检查通过后，才注册服务到网关，接收请求。
+
+### 5.1 应用状态
+
+设计了4种应用状态，RUNNING（正常服务）、BROKEN（应用不能正常服务）、SHUTDOWNING（关闭中）、STARTING（启动中）。 
+
+关闭应用前，将应用状态设置为 SHUTDOWNING（关闭中），这时应用状态检查接口返回 503（服务不可达）错误，一定周期后，网关会检测到服务不可用，将该节点下线。然后再执行真正的应用关闭命令。
+
+启动应用后，应用状态初始值为 STARTING（启动中），这时应用状态检查接口返回 503（服务不可达）错误。直到应用健康状态检查通过后，才会将应用状态设置为 RUNNING（正常服务），这时应用状态检查接口返回 200，经过一定周期后，网关检测到服务可用，将该节点上线。
+
+源码见[shutdown-springboot1-graceful-state](/shutdown-springboot1-graceful-state)
+
+应用状态扩展点 [AppStateEndpoint](/shutdown-springboot1-graceful-state/src/main/java/com/jinpei/graceful/shutdown/springboot1/state/AppStateEndpoint.java)
+
+```java
+@ConfigurationProperties(prefix = "endpoints.appstate")
+public class AppStateEndpoint extends AbstractEndpoint<Map<String, Object>> {
+    @Getter
+    private volatile AppState appState = AppState.STARTING;
+
+    public AppStateEndpoint() {
+        super("appstate");
+    }
+
+    @Override
+    public Map<String, Object> invoke() {
+        return Collections.singletonMap("appState", appState);
+    }
+
+    public Map<String, Object> shutdown() {
+        appState = AppState.SHUTDOWNING;
+        return Collections.singletonMap("appState", appState);
+    }
+
+    public Map<String, Object> ready() {
+        appState = AppState.RUNNING;
+        return Collections.singletonMap("appState", appState);
+    }
+
+    public Map<String, Object> broken() {
+        appState = AppState.BROKEN;
+        return Collections.singletonMap("appState", appState);
+    }
+
+    public boolean isRunning() {
+        return appState == AppState.RUNNING;
+    }
+}
+```
+
+应用状态MVC扩展点 [AppStateMvcEndpoint](/shutdown-springboot1-graceful-state/src/main/java/com/jinpei/graceful/shutdown/springboot1/state/AppStateMvcEndpoint.java)
+
+```java
+@ConfigurationProperties(prefix = "endpoints.appstate")
+public class AppStateMvcEndpoint extends EndpointMvcAdapter {
+    private final AppStateEndpoint appStateEndpoint;
+
+    public AppStateMvcEndpoint(AppStateEndpoint delegate) {
+        super(delegate);
+        this.appStateEndpoint = delegate;
+    }
+
+    @RequestMapping(value = "/shutdown", method = RequestMethod.POST, produces = {ActuatorMediaTypes.APPLICATION_ACTUATOR_V1_JSON_VALUE, MediaType.APPLICATION_JSON_VALUE})
+    @ResponseBody
+    public Map<String, Object> shutdown() {
+        return appStateEndpoint.shutdown();
+    }
+
+    @RequestMapping(value = "/ready", method = RequestMethod.POST, produces = {ActuatorMediaTypes.APPLICATION_ACTUATOR_V1_JSON_VALUE, MediaType.APPLICATION_JSON_VALUE})
+    @ResponseBody
+    public Map<String, Object> ready() {
+        return appStateEndpoint.ready();
+    }
+}
+```
+
+应用状态健康检查接口，项目是根据 Nginx 反向代理设计的，Nginx upstream 健康检查需要使用业务端口，默认Spring Boot 健康检查使用管理端口。逻辑代码是相同的，可以根据实际情况使用。[AppStateHealthIndicator](/shutdown-springboot1-graceful-state/src/main/java/com/jinpei/graceful/shutdown/springboot1/state/AppStateHealthIndicator.java)
+
+```java
+@RequestMapping
+@Slf4j
+public class AppStateHealthIndicator {
+
+    @Autowired(required = false)
+    private HealthEndpoint healthEndpoint;
+
+    @Autowired(required = false)
+    private AppStateEndpoint appStateEndpoint;
+
+    @Autowired
+    private AppStateCheckProperties appStateCheckProperties;
+
+    @RequestMapping(path = "${endpoints.appstate.check.path:/__check__}", method = RequestMethod.GET)
+    public void check(HttpServletResponse response) {
+        if (null != appStateEndpoint && !appStateEndpoint.isRunning()) {
+            response.setStatus(HttpServletResponse.SC_SERVICE_UNAVAILABLE);
+        } else {
+            response.setStatus(HttpServletResponse.SC_OK);
+        }
+    }
+
+    /**
+     * 应用启动时，启动一个线程对应用的健康状态进行检查；如果健康检查通过，则将应用状态改为ready
+     */
+    @PostConstruct
+    public void init() {
+        if (null != healthEndpoint && null != appStateEndpoint) {
+            //如果开启了健康检查，那么启动线程对健康检查进行检测，监控检测通过会自动更新app state状态为ready
+            Thread thread = new Thread(() -> {
+                while (true) {
+                    try {
+                        Health health = healthEndpoint.invoke();
+                        if (health.getStatus() == Status.UP) {
+                            appStateEndpoint.ready();
+                            return;
+                        }
+                    } catch (Exception e) {
+                        log.debug("Invoke health endpoint error ", e);
+                    } finally {
+                        try {
+                            Thread.sleep(appStateCheckProperties.getInterval());
+                        } catch (InterruptedException ignore) {
+                        }
+                    }
+                }
+            });
+            thread.setDaemon(true);
+            thread.setName("AppStateReadyChecker");
+            thread.start();
+        }
+    }
+}
+```
+
+自动配置类 [AppStateAutoConfiguration](/shutdown-springboot1-graceful-state/src/main/java/com/jinpei/graceful/shutdown/springboot1/autoconfigure/AppStateAutoConfiguration.java)
+
+```java
+@Configuration
+@EnableConfigurationProperties(AppStateCheckProperties.class)
+public class AppStateAutoConfiguration {
+    @Bean
+    @ConditionalOnProperty(prefix = "endpoints.appstate.check", value = "enable", havingValue = "true", matchIfMissing = true)
+    public AppStateHealthIndicator AppStateHealthIndicator() {
+        return new AppStateHealthIndicator();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnEnabledEndpoint(value = "appstate")
+    public AppStateEndpoint appStateEndpoint() {
+        return new AppStateEndpoint();
+    }
+
+    @Bean
+    @ConditionalOnWebApplication
+    @ConditionalOnClass({EndpointMvcAdapter.class})
+    @ConditionalOnBean(AppStateEndpoint.class)
+    @ConditionalOnMissingBean
+    public AppStateMvcEndpoint appStateMvcEndpoint(AppStateEndpoint appStateEndpoint) {
+        return new AppStateMvcEndpoint(appStateEndpoint);
+    }
+}
+```
+
+## 6 参考
+
+参考了如下文章或代码:
+
+[https://github.com/spring-projects/spring-boot/issues/4657](https://github.com/spring-projects/spring-boot/issues/4657)
+
+[https://github.com/jihor/hiatus-spring-boot](https://github.com/jihor/hiatus-spring-boot)

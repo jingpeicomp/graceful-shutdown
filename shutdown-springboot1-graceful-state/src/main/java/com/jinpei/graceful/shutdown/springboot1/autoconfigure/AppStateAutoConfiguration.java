@@ -32,8 +32,8 @@ public class AppStateAutoConfiguration {
     }
 
     @Bean
-    @ConditionalOnClass({EndpointMvcAdapter.class})
     @ConditionalOnWebApplication
+    @ConditionalOnClass({EndpointMvcAdapter.class})
     @ConditionalOnBean(AppStateEndpoint.class)
     @ConditionalOnMissingBean
     public AppStateMvcEndpoint appStateMvcEndpoint(AppStateEndpoint appStateEndpoint) {
