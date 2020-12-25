@@ -1,6 +1,6 @@
 # 优雅停机
 
-## 单应用优雅停机的定义
+## 1 单应用优雅停机的定义
 
 优雅停机是指关闭应用程序时，在规定的超时时间范围内，允许进行中的请求完成，拒绝新的请求进入。这将使应用在请求处理方面保持一致，即没有未处理请求，每一个请求都被处理（完成或拒绝）。优雅停机包含三个要素：
 
@@ -8,7 +8,7 @@
 2. 完成正在进行中的请求
 3. 新的请求将被拒绝
 
-### 应用关闭命令-Linux Kill命令
+### 1.1 应用关闭命令-Linux Kill命令
 
 kill 命令常用的信号选项:
 
@@ -25,7 +25,7 @@ SIGINT/SIGKILL/SIGTERM 信号的区别:
 
 一般要结束某个进程，我们应该优先使用 kill pid ，而不是 kill -9 pid。如果对应程序提供优雅关闭机制的话, 在完全退出之前, 先可以做一些善后处理。
 
-### JAVA 对于应用关闭的底层支持
+### 1.2 JAVA 对于应用关闭的底层支持
 
 JAVA 语言底层有机制能捕获到 OS 的 SIGINT (kill -2 / ctrl + c) / SIGTERM (kill -15)信号。通过 Runtime.getRuntime().addShutdownHook() 向 JVM 中注册一个 ShutdownHook 线程，当 JVM 收到停止信号后，该线程将被激活运行。可以在Hook线程向其他线程发出中断指令，然后等待其他线程执行完毕，进而优雅地关闭整个程序。
 [示例代码](./shutdown-springboot1/src/main/java/com/jinpei/graceful/shutdown/springboot1/JavaShutdownHookDemo.java)：
@@ -74,7 +74,7 @@ ShutdownHook 的使用注意点：
 2. ShutdownHook 是JVM结束前调用的线程，所以该线程中的方法应尽量短，并且保证不能发生死锁的情况，否则也会阻止JVM的正常退出
 3. ShutdownHook 中不能执行 System.exit()，否则会导致虚拟机卡住，而不得不强行杀死进程
 
-### Spring 添加 ShutdownHook
+### 1.3 Spring 添加 ShutdownHook
 
 Spring 框架中添加 ShutdownHook 有两种方法：
 
@@ -161,11 +161,11 @@ protected void doClose() {
     
 ```
 
-## Spring Boot 2.3 之前版本 Actuator Shutdown
+## 2 Spring Boot 2.3 之前版本 Actuator Shutdown
 
 在 Spring Boot 2.3 之前版本是没有优雅停机的功能，见：[https://github.com/spring-projects/spring-boot/issues/4657](https://github.com/spring-projects/spring-boot/issues/4657)。Spring Boot Actuator 提供的 Shutdown 并不能实现优雅停机。
 
-### 代码测试
+### 2.1 代码测试
 
 测试代码见：[shutdown-springboot1](/shutdown-springboot1)，测试代码使用的 Spring Boot 版本为 1.5.22。
 
@@ -177,7 +177,7 @@ protected void doClose() {
 3. 关闭后，请求1会报错，得不到后端的返回值
 ![](https://s3.ax1x.com/2020/12/24/r2crUs.png)
 
-### 源码分析
+### 2.2 源码分析
 
 通过查看源码得知，2.3 版本之前的 Shutdown 只是关闭 Spring 上下文。
 首先查看 ShutdownMvcEndpoint 类，Shutdown 请求调用的这个类的 invoke 方法
@@ -241,15 +241,15 @@ public void close() {
 }
 ```
 
-### 小结
+### 2.3 小结
 
 无论测试和源码都说明 2.3 版本之前的 Shutdown 没有优雅停机的功能，基本等同于 执行 ctrl+c 或者 kill -2 或者 -9 。
 
-## Spring Boot 优雅停机
+## 3 Spring Boot（2.3 之前的版本）优雅停机实现
 
 有很多应用使用的是 Spring Boot 2.3 之前的版本，有些使用的还是 1.x 版本。 对于这部分应用我们需要我们自己实现优雅停机的功能。核心思路就是在系统关闭 ShutdownHook 中阻塞 Web 容器的线程池，直到所有请求都处理完毕。不同的 Web 容器有不同的优雅关闭方法。项目已经实现了 Tomcat、Jetty、Undertow 三个 Web 容器的优雅关闭代码，具体代码见：[shutdown-springboot1-graceful](/shutdown-springboot1-graceful/src/main/java)
 
-### Tomcat
+### 3.1 Tomcat
 
 Tomcat Web 容器关闭代码
 
@@ -306,7 +306,7 @@ public static class TomcatConfiguration {
 2. 不再接收新的请求，客户端报错信息为：Connection reset by peer
 3. 进程正常终止（业务请求执行完成后，进程立即停止）
 
-### Undertow
+### 3.2 Undertow
 
 Undertow Web 容器关闭代码
 
@@ -378,7 +378,7 @@ public static class UndertowConfiguration {
 2. 不再接收新的请求，客户端报错信息为：503 Service Unavailable
 3. 进程正常终止（业务请求执行完成后20秒进程停止）
 
-### Jetty
+### 3.3 Jetty
 
 Jetty Web 容器关闭代码
 
@@ -439,3 +439,17 @@ public static class JettyConfiguration {
 1. 正在执行操作不会终止，直到执行完成
 2. 不再接收新的请求，客户端报错信息为：Connection refused
 3. 进程正常终止（ kill 命令发出后20秒进程停止）
+
+## 4 Spring Boot（2.3 之后的版本）优雅停机
+
+在最新的 SpringBoot 2.3.0 版本中，正式内置了优雅停机功能，不需要再自行扩展线程池来处理。
+
+当启动server.shutdown=graceful，在应用关闭时，Web 服务器将不再接受新请求，并等待正在进行的请求完成的缓冲时间。配置如下：
+
+```text
+# 开启优雅停机，默认值：immediate 为立即关闭
+server.shutdown=graceful
+
+# 设置缓冲期，最大等待时间，默认：30秒
+spring.lifecycle.timeout-per-shutdown-phase=60s
+```
