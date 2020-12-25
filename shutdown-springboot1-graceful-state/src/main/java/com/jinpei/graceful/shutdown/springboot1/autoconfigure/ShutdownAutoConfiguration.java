@@ -7,6 +7,7 @@ import io.undertow.Undertow;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.catalina.startup.Tomcat;
 import org.eclipse.jetty.server.Server;
+import org.eclipse.jetty.server.handler.StatisticsHandler;
 import org.eclipse.jetty.util.Loader;
 import org.eclipse.jetty.webapp.WebAppContext;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -69,7 +70,15 @@ public class ShutdownAutoConfiguration {
     public static class JettyConfiguration {
         @Bean
         public JettyEmbeddedServletContainerFactory jettyEmbeddedServletContainerFactory() {
-            return new JettyEmbeddedServletContainerFactory();
+            JettyEmbeddedServletContainerFactory factory = new JettyEmbeddedServletContainerFactory();
+            factory.addServerCustomizers(server -> {
+                StatisticsHandler handler = new StatisticsHandler();
+                handler.setHandler(server.getHandler());
+                server.setHandler(handler);
+                server.setStopTimeout(20 * 1000);
+                server.setStopAtShutdown(false);
+            });
+            return factory;
         }
 
         @Bean

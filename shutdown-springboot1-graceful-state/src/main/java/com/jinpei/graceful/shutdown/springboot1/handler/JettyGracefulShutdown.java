@@ -26,7 +26,6 @@ public class JettyGracefulShutdown implements ApplicationListener<ContextClosedE
         if (servletContainer instanceof JettyEmbeddedServletContainer) {
             log.info("Start to stop jetty servlet container.");
             JettyEmbeddedServletContainer jettyContainer = (JettyEmbeddedServletContainer) servletContainer;
-            jettyContainer.getServer().setStopTimeout(20 * 1000);
             try {
                 jettyContainer.getServer().stop();
             } catch (Exception e) {

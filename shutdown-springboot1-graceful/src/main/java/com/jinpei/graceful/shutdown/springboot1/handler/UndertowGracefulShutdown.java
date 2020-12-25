@@ -3,6 +3,7 @@ package com.jinpei.graceful.shutdown.springboot1.handler;
 import io.undertow.server.HandlerWrapper;
 import io.undertow.server.HttpHandler;
 import io.undertow.server.handlers.GracefulShutdownHandler;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.event.ContextClosedEvent;
@@ -33,6 +34,7 @@ public class UndertowGracefulShutdown implements ApplicationListener<ContextClos
     }
 
     public static class UndertowGracefulShutdownWrapper implements HandlerWrapper {
+        @Getter
         private GracefulShutdownHandler gracefulShutdownHandler;
 
         @Override
@@ -40,10 +42,6 @@ public class UndertowGracefulShutdown implements ApplicationListener<ContextClos
             if (gracefulShutdownHandler == null) {
                 this.gracefulShutdownHandler = new GracefulShutdownHandler(handler);
             }
-            return gracefulShutdownHandler;
-        }
-
-        public GracefulShutdownHandler getGracefulShutdownHandler() {
             return gracefulShutdownHandler;
         }
     }

@@ -70,7 +70,7 @@ public class JavaShutdownHookDemo {
 
 ShutdownHook 的使用注意点：
 
-1. ShutdownHook 的调用是不保证顺序的
+1. ShutdownHook 本质是线程，因此调用是不保证顺序的
 2. ShutdownHook 是JVM结束前调用的线程，所以该线程中的方法应尽量短，并且保证不能发生死锁的情况，否则也会阻止JVM的正常退出
 3. ShutdownHook 中不能执行 System.exit()，否则会导致虚拟机卡住，而不得不强行杀死进程
 
@@ -161,6 +161,281 @@ protected void doClose() {
     
 ```
 
-## Spring Boot Web 应用优雅停机
+## Spring Boot 2.3 之前版本 Actuator Shutdown
 
-在 Spring Boot 2.3 之前版本是没有优雅停机的功能，见：[https://github.com/spring-projects/spring-boot/issues/4657](https://github.com/spring-projects/spring-boot/issues/4657)。Spring Boot Actuator 提供的 Shutdown 并不能实现优雅停机。 测试代码见：[shutdown-springboot1](/shutdown-springboot1)
+在 Spring Boot 2.3 之前版本是没有优雅停机的功能，见：[https://github.com/spring-projects/spring-boot/issues/4657](https://github.com/spring-projects/spring-boot/issues/4657)。Spring Boot Actuator 提供的 Shutdown 并不能实现优雅停机。
+
+### 代码测试
+
+测试代码见：[shutdown-springboot1](/shutdown-springboot1)，测试代码使用的 Spring Boot 版本为 1.5.22。
+
+1. 启动应用后，访问 [http://localhost:8081/api/hello?serialNo=111&sleepSeconds=100](http://localhost:8081/api/hello?serialNo=111&sleepSeconds=100)，此接口会阻塞100秒。
+
+2. 通过 Shutdown Endpoint 关闭应用：
+![](https://s3.ax1x.com/2020/12/24/r2cQDe.png)
+
+3. 关闭后，请求1会报错，得不到后端的返回值
+![](https://s3.ax1x.com/2020/12/24/r2crUs.png)
+
+### 源码分析
+
+通过查看源码得知，2.3 版本之前的 Shutdown 只是关闭 Spring 上下文。
+首先查看 ShutdownMvcEndpoint 类，Shutdown 请求调用的这个类的 invoke 方法
+
+```java
+@PostMapping(produces = { ActuatorMediaTypes.APPLICATION_ACTUATOR_V1_JSON_VALUE, MediaType.APPLICATION_JSON_VALUE })
+@ResponseBody
+@Override
+public Object invoke() {
+    if (!getDelegate().isEnabled()) {
+        return new ResponseEntity<Map<String, String>>(
+                Collections.singletonMap("message", "This endpoint is disabled"), HttpStatus.NOT_FOUND);
+    }
+    return super.invoke();
+}
+```
+
+最终是调用 ShutdownEndpoint 的 invoke 方法。ShutdownEndpoint 源码：
+
+```java
+public Map<String, Object> invoke() {
+    if (this.context == null) {
+        return NO_CONTEXT_MESSAGE;
+    }
+    try {
+        return SHUTDOWN_MESSAGE;
+    }
+    finally {
+        Thread thread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Thread.sleep(500L);
+                }
+                catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                }
+                ShutdownEndpoint.this.context.close();
+            }
+        });
+        thread.setContextClassLoader(getClass().getClassLoader());
+        thread.start();
+    }
+}
+```
+
+进一步分析，ShutdownEndpoint 的 invoke 方法调用了 ConfigurableApplicationContext 的 close 方法， ConfigurableApplicationContext 只是一个接口， close 方法的实现类在 AbstractApplicationContext 类。分析到这里，是不是有种熟悉的感觉，不错，AbstractApplicationContext 类就是前面 Spring 添加 JAVA ShutdownHook 的类。AbstractApplicationContext close 方法最终还是调用的 doClose 方法。
+
+```java
+public void close() {
+    synchronized(this.startupShutdownMonitor) {
+        this.doClose();
+        if (this.shutdownHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(this.shutdownHook);
+            } catch (IllegalStateException var4) {
+            }
+        }
+
+    }
+}
+```
+
+### 小结
+
+无论测试和源码都说明 2.3 版本之前的 Shutdown 没有优雅停机的功能，基本等同于 执行 ctrl+c 或者 kill -2 或者 -9 。
+
+## Spring Boot 优雅停机
+
+有很多应用使用的是 Spring Boot 2.3 之前的版本，有些使用的还是 1.x 版本。 对于这部分应用我们需要我们自己实现优雅停机的功能。核心思路就是在系统关闭 ShutdownHook 中阻塞 Web 容器的线程池，直到所有请求都处理完毕。不同的 Web 容器有不同的优雅关闭方法。项目已经实现了 Tomcat、Jetty、Undertow 三个 Web 容器的优雅关闭代码，具体代码见：[shutdown-springboot1-graceful](/shutdown-springboot1-graceful/src/main/java)
+
+### Tomcat
+
+Tomcat Web 容器关闭代码
+
+```java
+public class TomcatGracefulShutdown implements TomcatConnectorCustomizer, ApplicationListener<ContextClosedEvent> {
+    private volatile Connector connector;
+
+    public void customize(Connector connector) {
+        this.connector = connector;
+    }
+
+    public void onApplicationEvent(ContextClosedEvent contextClosedEvent) {
+        this.connector.pause();
+        Executor executor = this.connector.getProtocolHandler().getExecutor();
+        if (executor instanceof ThreadPoolExecutor) {
+            try {
+                log.info("Start to shutdown tomcat thread pool.");
+                ThreadPoolExecutor threadPoolExecutor = (ThreadPoolExecutor) executor;
+                threadPoolExecutor.shutdown();
+                if (!threadPoolExecutor.awaitTermination(20, TimeUnit.SECONDS)) {
+                    log.warn("Tomcat thread pool did not shutdown gracefully within 20 seconds. ");
+                }
+            } catch (InterruptedException e) {
+                log.warn("Fail to shut down tomcat thread pool ", e);
+            }
+        }
+    }
+}
+```
+
+Spring Boot 自动配置代码
+
+```java
+@Configuration
+@ConditionalOnClass({Servlet.class, Tomcat.class})
+public static class TomcatConfiguration {
+    @Bean
+    public TomcatGracefulShutdown tomcatGracefulShutdown() {
+        return new TomcatGracefulShutdown();
+    }
+
+    @Bean
+    public EmbeddedServletContainerFactory tomcatEmbeddedServletContainerFactory(TomcatGracefulShutdown gracefulShutdown) {
+        TomcatEmbeddedServletContainerFactory tomcatFactory = new TomcatEmbeddedServletContainerFactory();
+        tomcatFactory.addConnectorCustomizers(gracefulShutdown);
+        return tomcatFactory;
+    }
+}
+```
+
+发送[http://localhost:8081/api/hello?serialNo=111&sleepSeconds=10](http://localhost:8081/api/hello?serialNo=111&sleepSeconds=10) 请求进行测试，然后 kill （kill -2（Ctrl + C）、kill -15）应用。测试结果如下：
+
+1. 正在执行操作不会终止，直到执行完成
+2. 不再接收新的请求，客户端报错信息为：Connection reset by peer
+3. 进程正常终止（业务请求执行完成后，进程立即停止）
+
+### Undertow
+
+Undertow Web 容器关闭代码
+
+```java
+@Slf4j
+public class UndertowGracefulShutdown implements ApplicationListener<ContextClosedEvent> {
+
+    private final UndertowGracefulShutdownWrapper gracefulShutdownWrapper;
+
+    public UndertowGracefulShutdown(UndertowGracefulShutdownWrapper wrapper) {
+        this.gracefulShutdownWrapper = wrapper;
+    }
+
+    public void onApplicationEvent(ContextClosedEvent contextClosedEvent) {
+        try {
+            log.info("Start to shutdown undertow thread pool");
+            gracefulShutdownWrapper.getGracefulShutdownHandler().shutdown();
+            if (!gracefulShutdownWrapper.getGracefulShutdownHandler().awaitShutdown(20 * 1000)) {
+                log.warn("Undertow thread pool did not shutdown gracefully within 20 seconds. ");
+            }
+        } catch (Exception e) {
+            log.warn("Fail to shutdown undertow thread pool", e);
+        }
+    }
+
+    public static class UndertowGracefulShutdownWrapper implements HandlerWrapper {
+        @Getter
+        private GracefulShutdownHandler gracefulShutdownHandler;
+
+        @Override
+        public HttpHandler wrap(HttpHandler handler) {
+            if (gracefulShutdownHandler == null) {
+                this.gracefulShutdownHandler = new GracefulShutdownHandler(handler);
+            }
+            return gracefulShutdownHandler;
+        }
+    }
+}
+```
+
+Spring Boot 自动配置代码
+
+```java
+@Configuration
+@ConditionalOnClass({Servlet.class, Undertow.class, SslClientAuthMode.class})
+public static class UndertowConfiguration {
+    @Bean
+    public UndertowGracefulShutdown.UndertowGracefulShutdownWrapper undertowGracefulShutdownWrapper() {
+        return new UndertowGracefulShutdown.UndertowGracefulShutdownWrapper();
+    }
+
+    @Bean
+    public UndertowEmbeddedServletContainerFactory undertowEmbeddedServletContainerFactory(UndertowGracefulShutdown.UndertowGracefulShutdownWrapper wrapper) {
+        UndertowEmbeddedServletContainerFactory factory = new UndertowEmbeddedServletContainerFactory();
+        factory.addDeploymentInfoCustomizers(deploymentInfo -> deploymentInfo.addOuterHandlerChainWrapper(wrapper));
+        return factory;
+    }
+
+    @Bean
+    public UndertowGracefulShutdown undertowGracefulShutdown(UndertowGracefulShutdown.UndertowGracefulShutdownWrapper wrapper) {
+        return new UndertowGracefulShutdown(wrapper);
+    }
+}
+```
+
+发送[http://localhost:8081/api/hello?serialNo=111&sleepSeconds=10](http://localhost:8081/api/hello?serialNo=111&sleepSeconds=10) 请求进行测试，然后 kill （kill -2（Ctrl + C）、kill -15）应用。测试结果如下：
+
+1. 正在执行操作不会终止，直到执行完成
+2. 不再接收新的请求，客户端报错信息为：503 Service Unavailable
+3. 进程正常终止（业务请求执行完成后20秒进程停止）
+
+### Jetty
+
+Jetty Web 容器关闭代码
+
+```java
+@Slf4j
+public class JettyGracefulShutdown implements ApplicationListener<ContextClosedEvent> {
+
+    private final EmbeddedWebApplicationContext context;
+
+    public JettyGracefulShutdown(EmbeddedWebApplicationContext context) {
+        this.context = context;
+    }
+
+    @Override
+    public void onApplicationEvent(ContextClosedEvent contextClosedEvent) {
+        EmbeddedServletContainer servletContainer = context.getEmbeddedServletContainer();
+        if (servletContainer instanceof JettyEmbeddedServletContainer) {
+            log.info("Start to stop jetty servlet container.");
+            JettyEmbeddedServletContainer jettyContainer = (JettyEmbeddedServletContainer) servletContainer;
+            try {
+                jettyContainer.getServer().stop();
+            } catch (Exception e) {
+                log.warn("Fait to stop jetty thread pool ", e);
+            }
+        }
+    }
+}
+```
+
+Spring Boot 自动配置代码
+
+```java
+@Configuration
+@ConditionalOnClass({Servlet.class, Server.class, Loader.class, WebAppContext.class})
+public static class JettyConfiguration {
+    @Bean
+    public JettyEmbeddedServletContainerFactory jettyEmbeddedServletContainerFactory() {
+        JettyEmbeddedServletContainerFactory factory = new JettyEmbeddedServletContainerFactory();
+        factory.addServerCustomizers(server -> {
+            StatisticsHandler handler = new StatisticsHandler();
+            handler.setHandler(server.getHandler());
+            server.setHandler(handler);
+            server.setStopTimeout(20 * 1000);
+            server.setStopAtShutdown(false);
+        });
+        return factory;
+    }
+
+    @Bean
+    public JettyGracefulShutdown jettyGracefulShutdown(EmbeddedWebApplicationContext context) {
+        return new JettyGracefulShutdown(context);
+    }
+}
+```
+
+发送[http://localhost:8081/api/hello?serialNo=111&sleepSeconds=10](http://localhost:8081/api/hello?serialNo=111&sleepSeconds=10) 请求进行测试，然后 kill （kill -2（Ctrl + C）、kill -15）应用。测试结果如下：
+
+1. 正在执行操作不会终止，直到执行完成
+2. 不再接收新的请求，客户端报错信息为：Connection refused
+3. 进程正常终止（ kill 命令发出后20秒进程停止）
